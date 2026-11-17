@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mic ANC Lab</title>
+<style>
+:root{--bg:#f4f6f8;--card:#ffffff;--fg:#14202b;--muted:#5b6b79;--line:#d5dde4;--accent:#0a7d6e;--accent-fg:#ffffff;--warn:#b45309;--bar:#0a7d6e;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1419;--card:#161e25;--fg:#e6edf2;--muted:#8fa1b0;--line:#26323c;--accent:#3ddbc0;--accent-fg:#06211c;--warn:#f5b04c;--bar:#3ddbc0;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:20px max(16px,env(safe-area-inset-left)) 40px max(16px,env(safe-area-inset-right))}
+main{max-width:560px;margin:0 auto;display:grid;gap:16px}
+h1{font-size:1.5rem;margin:0}
+p{margin:0}
+.muted{color:var(--muted);font-size:.9rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;gap:14px}
+.warn{border-color:var(--warn);color:var(--fg)}
+.warn b{color:var(--warn)}
+button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:14px 18px;background:var(--accent);color:var(--accent-fg);cursor:pointer}
+button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line);padding:8px 12px;font-weight:500;font-size:.9rem}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+label{display:grid;gap:6px;font-weight:600;font-size:.95rem}
+label span.v{font-weight:400;color:var(--muted);font-variant-numeric:tabular-nums}
+.row{display:flex;justify-content:space-between;gap:8px}
+input[type=range]{width:100%;accent-color:var(--accent)}
+select{font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+canvas{width:100%;height:110px;background:var(--bg);border:1px solid var(--line);border-radius:8px;display:block}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.stat{border:1px solid var(--line);border-radius:8px;padding:10px}
+.stat small{display:block;color:var(--muted)}
+.stat strong{font-size:1.2rem;font-variant-numeric:tabular-nums}
+.meter{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;border:1px solid var(--line)}
+.meter i{display:block;height:100%;width:0;background:var(--bar)}
+#status{min-height:1.4em}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Mic ANC Lab</h1>
+    <p class="muted">Experimental noise cancelling using your phone's microphone and any wired earphones.</p>
+  </header>
+
+  <section class="card warn" aria-label="Before you start">
+    <p><b>Read first.</b> Put the earphones in your ears before pressing Start, and keep the strength low. If you hear a howl, you have feedback: lower the strength or the phone volume.</p>
+    <p class="muted">This blocks sound you may need to hear. Do not use it while walking near traffic, cycling or driving. It works best on steady low sounds such as a fan, AC or engine hum, and does little for voices.</p>
+  </section>
+
+  <section class="card">
+    <button id="toggle" type="button">Start</button>
+    <p id="status" class="muted" role="status">Not running.</p>
+
+    <label>Mode
+      <select id="mode">
+        <option value="predict" selected>Predictive (recommended)</option>
+        <option value="invert">Simple inverse with delay</option>
+      </select>
+    </label>
+
+    <label><span class="row"><span>Strength</span><span class="v" id="vGain">40%</span></span>
+      <input id="gain" type="range" min="0" max="100" value="40">
+    </label>
+
+    <label><span class="row"><span>Frequency range (cancel below)</span><span class="v" id="vCut">300 Hz</span></span>
+      <input id="cut" type="range" min="80" max="1000" step="10" value="300">
+    </label>
+
+    <label><span class="row"><span>Delay to compensate</span><span class="v" id="vLat">30 ms</span></span>
+      <input id="lat" type="range" min="0" max="80" step="0.5" value="30">
+    </label>
+    <div class="row">
+      <button id="auto" type="button" class="ghost">Set from reported latency</button>
+      <span class="muted" id="reported">Reported: not started</span>
+    </div>
+
+    <label><span class="row"><span>Adaptation speed</span><span class="v" id="vMu">0.004</span></span>
+      <input id="mu" type="range" min="0.0005" max="0.02" step="0.0005" value="0.004">
+    </label>
+  </section>
+
+  <section class="card" aria-label="Live readings">
+    <div class="stats">
+      <div class="stat"><small>Mic level</small><strong id="level">-</strong>
+        <div class="meter" aria-hidden="true"><i id="levelBar"></i></div></div>
+      <div class="stat"><small>Predictable noise (best case cut)</small><strong id="pred">-</strong></div>
+    </div>
+    <canvas id="spec" width="520" height="110" aria-label="Spectrum from 0 to 1000 Hz"></canvas>
+    <p class="muted">The best case figure estimates how much of the noise could be cancelled if the delay were set exactly. Real results in your ear will be lower. Tune the delay slider by ear while a steady noise plays.</p>
+  </section>
+
+  <section class="card">
+    <p><b>How it works</b></p>
+    <p class="muted">The phone mic hears the noise, a filter keeps only the low frequencies, and the app plays the opposite signal into your earphones. Phone audio has a delay of roughly 10 to 60 ms, so the predictive mode learns the noise pattern and plays what the noise will be a moment from now. This works for repeating sounds, not for sudden ones.</p>
+    <p class="muted">Needs HTTPS (for example GitHub Pages) or localhost for the browser to allow microphone access. Bluetooth earphones add 100 ms or more of delay, which makes this ineffective. Use wired earphones.</p>
+  </section>
+</main>
+
+<script type="text/plain" id="wk">
+class ANC extends AudioWorkletProcessor {
+  constructor(){
+    super();
+    this.N = 64;
+    this.M = 8191;
+    this.w = new Float32Array(this.N);
+    this.buf = new Float32Array(8192);
+    this.pos = 0;
+    this.L = 1440;
+    this.mu = 0.004;
+    this.gain = 0.4;
+    this.mode = 'predict';
+    this.inE = 0; this.errE = 0; this.count = 0;
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d.L !== undefined) this.L = Math.max(0, Math.min(4000, Math.round(d.L)));
+      if (d.mu !== undefined) this.mu = d.mu;
+      if (d.gain !== undefined) this.gain = d.gain;
+      if (d.mode !== undefined) { this.mode = d.mode; this.w.fill(0); }
+    };
+  }
+  process(inputs, outputs){
+    const inp = inputs[0] && inputs[0][0];
+    const out = outputs[0][0];
+    if (!inp || !out) return true;
+    const N = this.N, M = this.M, w = this.w, buf = this.buf, L = this.L;
+    for (let i = 0; i < out.length; i++) {
+      const x = inp[i];
+      buf[this.pos] = x;
+      let y = 0;
+      if (this.mode === 'predict') {
+        let p = 0, en = 0;
+        for (let k = 0; k < N; k++) {
+          const v = buf[(this.pos - L - k) & M];
+          p += w[k] * v;
+          en += v * v;
+        }
+        const e = x - p;
+        const step = this.mu * e / (en + 1e-4);
+        for (let k = 0; k < N; k++) {
+          w[k] += step * buf[(this.pos - L - k) & M];
+        }
+        for (let k = 0; k < N; k++) y += w[k] * buf[(this.pos - k) & M];
+        this.inE += x * x;
+        this.errE += e * e;
+      } else {
+        y = buf[(this.pos - L) & M];
+        this.inE += x * x;
+        this.errE += x * x;
+      }
+      if (!isFinite(y)) { w.fill(0); y = 0; }
+      let o = -y * this.gain;
+      if (o > 0.7) o = 0.7; else if (o < -0.7) o = -0.7;
+      out[i] = o;
+      this.pos = (this.pos + 1) & M;
+    }
+    this.count += out.length;
+    if (this.count >= 4096) {
+      this.port.postMessage({ inE: this.inE / this.count, errE: this.errE / this.count });
+      this.inE = 0; this.errE = 0; this.count = 0;
+    }
+    return true;
+  }
+}
+registerProcessor('anc', ANC);
+</script>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ctx = null, stream = null, node = null, lp = null, analyser = null, raf = 0, running = false;
+
+function setStatus(t){ $('status').textContent = t; }
+
+function readParams(){
+  return {
+    L: ctx ? (+$('lat').value / 1000) * ctx.sampleRate : 0,
+    mu: +$('mu').value,
+    gain: +$('gain').value / 100,
+    mode: $('mode').value
+  };
+}
+function push(){ if (node) node.port.postMessage(readParams()); }
+
+function syncLabels(){
+  $('vGain').textContent = $('gain').value + '%';
+  $('vCut').textContent = $('cut').value + ' Hz';
+  $('vLat').textContent = (+$('lat').value).toFixed(1) + ' ms';
+  $('vMu').textContent = (+$('mu').value).toFixed(4);
+}
+
+async function start(){
+  setStatus('Asking for microphone...');
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1 }
+    });
+  } catch (e) {
+    setStatus('Microphone blocked: ' + e.message + '. Open this page over HTTPS and allow the microphone.');
+    return;
+  }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  ctx = new AC({ latencyHint: 'interactive' });
+  const url = URL.createObjectURL(new Blob([$('wk').textContent], { type:'application/javascript' }));
+  try {
+    await ctx.audioWorklet.addModule(url);
+  } catch (e) {
+    setStatus('This browser could not start the audio engine: ' + e.message);
+    stop();
+    return;
+  }
+  const src = ctx.createMediaStreamSource(stream);
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 30;
+  lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = +$('cut').value; lp.Q.value = 0.707;
+  node = new AudioWorkletNode(ctx, 'anc', { numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1] });
+  node.port.onmessage = (e) => showReadings(e.data);
+  const lim = ctx.createDynamicsCompressor();
+  lim.threshold.value = -12; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.001; lim.release.value = 0.1;
+  analyser = ctx.createAnalyser(); analyser.fftSize = 2048;
+
+  src.connect(analyser);
+  src.connect(hp); hp.connect(lp); lp.connect(node);
+  node.connect(lim); lim.connect(ctx.destination);
+
+  await ctx.resume();
+  push();
+  running = true;
+  $('toggle').textContent = 'Stop';
+  setStatus('Running. Increase strength slowly.');
+  updateReported();
+  draw();
+}
+
+function stop(){
+  running = false;
+  cancelAnimationFrame(raf);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (ctx) ctx.close();
+  ctx = null; stream = null; node = null; lp = null; analyser = null;
+  $('toggle').textContent = 'Start';
+  $('level').textContent = '-'; $('pred').textContent = '-'; $('levelBar').style.width = '0';
+  setStatus('Stopped.');
+}
+
+function reportedMs(){
+  if (!ctx) return 0;
+  return ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000;
+}
+function updateReported(){
+  const ms = reportedMs();
+  $('reported').textContent = ms ? 'Reported: ' + ms.toFixed(1) + ' ms (plus mic delay)' : 'Reported: unavailable';
+}
+
+function showReadings(d){
+  const rms = Math.sqrt(d.inE);
+  const db = 20 * Math.log10(rms + 1e-6);
+  $('level').textContent = db.toFixed(0) + ' dB';
+  $('levelBar').style.width = Math.max(0, Math.min(100, (db + 80) * 1.6)) + '%';
+  if ($('mode').value === 'predict' && d.inE > 1e-9) {
+    const red = Math.max(0, 10 * Math.log10(d.inE / (d.errE + 1e-12)));
+    $('pred').textContent = red.toFixed(1) + ' dB';
+  } else {
+    $('pred').textContent = '-';
+  }
+}
+
+function draw(){
+  if (!running || !analyser) return;
+  const c = $('spec'), g = c.getContext('2d');
+  const cs = getComputedStyle(document.documentElement);
+  const bar = cs.getPropertyValue('--bar').trim(), line = cs.getPropertyValue('--line').trim();
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+  g.clearRect(0, 0, c.width, c.height);
+  const hz = ctx.sampleRate / analyser.fftSize;
+  const maxBin = Math.floor(1000 / hz);
+  const bw = c.width / maxBin;
+  g.fillStyle = bar;
+  for (let i = 0; i < maxBin; i++) {
+    const h = (data[i] / 255) * (c.height - 4);
+    g.fillRect(i * bw, c.height - h, Math.max(1, bw - 0.5), h);
+  }
+  g.strokeStyle = line;
+  g.fillStyle = cs.getPropertyValue('--muted').trim();
+  g.font = '11px system-ui';
+  [250, 500, 750].forEach(f => {
+    const x = (f / 1000) * c.width;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, c.height); g.stroke();
+    g.fillText(f + ' Hz', x + 3, 12);
+  });
+  const cutX = (+$('cut').value / 1000) * c.width;
+  g.strokeStyle = bar; g.setLineDash([4, 4]);
+  g.beginPath(); g.moveTo(cutX, 0); g.lineTo(cutX, c.height); g.stroke(); g.setLineDash([]);
+  raf = requestAnimationFrame(draw);
+}
+
+$('toggle').addEventListener('click', () => { running ? stop() : start(); });
+$('auto').addEventListener('click', () => {
+  if (!ctx) { setStatus('Press Start first.'); return; }
+  const ms = Math.min(80, reportedMs() + 10);
+  $('lat').value = ms.toFixed(1);
+  syncLabels(); push();
+});
+['gain','lat','mu','mode'].forEach(id => $(id).addEventListener('input', () => { syncLabels(); push(); }));
+$('cut').addEventListener('input', () => { syncLabels(); if (lp) lp.frequency.value = +$('cut').value; });
+syncLabels();
+</script>
+</body>
+</html>
